@@ -1,0 +1,8 @@
+# Ignore unrelated photo manager scripts
+*.py
+*.pyw
+*.json
+.photo_manager_config.json
+/scratch/
+/logs/
+/steps/
