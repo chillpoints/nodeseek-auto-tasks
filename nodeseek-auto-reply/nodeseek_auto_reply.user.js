@@ -511,75 +511,14 @@
         });
       });
 
-      // 3. 寻找贴内 >= 3 次的重复回复，且不在我们当前预设里的
-      const allExistingTexts = new Set();
-      presets.forEach(group => group.replies.forEach(r => allExistingTexts.add(r.text.toLowerCase().trim())));
 
-      const repeatedReplies = Object.keys(counts).filter(c => counts[c] >= 3 && !allExistingTexts.has(c.toLowerCase().trim()));
-
-      if (repeatedReplies.length > 0) {
-        addLog(`💡 检测到帖子内存在超过 3 条的高频相同回复: ${JSON.stringify(repeatedReplies)}`, 'info');
-        
-        // 词频云记录
-        let dynamicWords = GM_getValue('ns_auto_reply_learned_words', {});
-        
-        repeatedReplies.forEach(newReply => {
-          if (!dynamicWords[newReply]) {
-            dynamicWords[newReply] = { count: 0, words: {} };
-          }
-          dynamicWords[newReply].count += counts[newReply];
-          
-          // 累积本帖的标题分词词云
-          titleWords.forEach(w => {
-            dynamicWords[newReply].words[w] = (dynamicWords[newReply].words[w] || 0) + 1;
-          });
-
-          // 寻找本条回复对应的词云中词频最高的前 3 个词作为关联关键词
-          const sortedWords = Object.entries(dynamicWords[newReply].words)
-            .sort((a, b) => b[1] - a[1])
-            .slice(0, 3)
-            .map(entry => entry[0]);
-
-          const assocKeywords = sortedWords.length > 0 ? sortedWords.join(',') : '自动学习';
-          const newWeight = Math.min(5.0, 1.5 + 0.1 * dynamicWords[newReply].count); // 根据总频次增加其初始权重
-
-          // 寻找是否有可以归类的已有关键词组，或者新建关键词组
-          let matchedGroup = presets.find(g => g.keywords === assocKeywords);
-          if (!matchedGroup && sortedWords.length > 0) {
-            matchedGroup = presets.find(g => {
-              if (g.keywords === 'default') return false;
-              const gKeys = g.keywords.split(/[，,]/).map(k => k.trim());
-              return sortedWords.some(w => gKeys.includes(w));
-            });
-          }
-
-          if (matchedGroup) {
-            if (!matchedGroup.replies.some(r => r.text === newReply)) {
-              matchedGroup.replies.push({ text: newReply, weight: newWeight });
-              updated = true;
-            } else {
-              const rObj = matchedGroup.replies.find(r => r.text === newReply);
-              rObj.weight = newWeight;
-              updated = true;
-            }
-          } else {
-            presets.unshift({
-              keywords: assocKeywords,
-              replies: [{ text: newReply, weight: newWeight }]
-            });
-            updated = true;
-          }
-          addLog(`🎓 [自适应学习] 学到高频回复: "${newReply}" -> 关联关键词: [${assocKeywords}]，权重: ${newWeight.toFixed(1)}`, 'success');
-        });
-        GM_setValue('ns_auto_reply_learned_words', dynamicWords);
-      }
 
       // 回写 GM 存储，刷新预设文本框
       if (updated) {
         const newPresetsText = stringifyPresets(presets);
         GM_setValue('ns_auto_reply_presetsText', newPresetsText);
         
-        const txtArea = runtime.panel?.shadowRoot?.getElementById('ns-presets-text');
+        const txtArea = runtime.panel?.querySelector('#ns-presets-text');
         if (txtArea) {
           txtArea.value = newPresetsText;
         }
@@ -621,7 +560,7 @@
 
   function triggerNextPage(nextPageUrl) {
     let seconds = 3;
-    const statusText = runtime.panel?.shadowRoot?.getElementById('ns-status-text');
+    const statusText = runtime.panel?.querySelector('#ns-status-text');
     addLog(`📭 当前页没有符合条件的未回复帖子，准备自动翻页...`, 'warning');
     
     const countdown = () => {
@@ -1080,9 +1019,352 @@ ${candidateTexts.join('\n')}`;
     }
   }
 
+  // ==================== 帖子内容统计功能 ====================
+  const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+  function fetchHtml(url) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: "GET",
+        url: url.startsWith('http') ? url : (location.origin + url),
+        onload: (xhr) => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            resolve(xhr.responseText);
+          } else {
+            reject(new Error(`HTTP ${xhr.status}`));
+          }
+        },
+        onerror: (err) => reject(new Error("网络请求失败"))
+      });
+    });
+  }
+
+  function htmlToMarkdown(node) {
+    if (!node) return "";
+    let markdown = "";
+    
+    const children = node.childNodes;
+    if (children && children.length > 0) {
+      for (const child of children) {
+        const type = child.nodeType;
+        if (type === 3) { // Node.TEXT_NODE
+          markdown += child.nodeValue;
+        } else if (type === 1) { // Node.ELEMENT_NODE
+          const tag = child.tagName.toLowerCase();
+          const subText = htmlToMarkdown(child);
+          switch (tag) {
+            case 'h1': markdown += `\n# ${subText}\n`; break;
+            case 'h2': markdown += `\n## ${subText}\n`; break;
+            case 'h3': markdown += `\n### ${subText}\n`; break;
+            case 'h4': markdown += `\n#### ${subText}\n`; break;
+            case 'p': markdown += `\n${subText}\n`; break;
+            case 'br': markdown += `\n`; break;
+            case 'a': markdown += `[${subText}](${child.getAttribute('href') || ''})`; break;
+            case 'img': markdown += `![${child.getAttribute('alt') || '图片'}](${child.getAttribute('src') || ''})`; break;
+            case 'strong': case 'b': markdown += `**${subText}**`; break;
+            case 'em': case 'i': markdown += `*${subText}*`; break;
+            case 'li': markdown += `* ${subText}\n`; break;
+            case 'ul': case 'ol': markdown += `\n${subText}\n`; break;
+            case 'pre': markdown += `\n\`\`\`\n${child.textContent}\n\`\`\`\n`; break;
+            case 'code': markdown += `\`${subText}\``; break;
+            case 'blockquote': markdown += `\n> ${subText.replace(/\n/g, '\n> ')}\n`; break;
+            default: markdown += subText;
+          }
+        }
+      }
+    } else {
+      if (node.nodeType === 3) {
+        markdown += node.nodeValue;
+      } else {
+        markdown += node.textContent || "";
+      }
+    }
+    return markdown;
+  }
+
+  function parsePostsFromDoc(doc) {
+    const config = getLocalConfig();
+    const items = doc.querySelectorAll('li.post-list-item, .post-list-item');
+    const posts = [];
+    const kwFilterList = config.kwFilter.split(/[，,]/).map(k => k.trim().toLowerCase()).filter(Boolean);
+    const kwBlockList = config.kwBlock.split(/[，,]/).map(k => k.trim().toLowerCase()).filter(Boolean);
+    const idBlockList = config.idBlock.split(/[，,]/).map(k => {
+      const clean = k.trim();
+      const m = clean.match(/\d+/);
+      return m ? m[0] : clean;
+    }).filter(Boolean);
+    const userBlockList = config.userBlock.split(/[，,]/).map(k => k.trim().toLowerCase().replace(/^@/, '')).filter(Boolean);
+
+    items.forEach(item => {
+      const link = item.querySelector('.post-title a[href], a.post-title[href]');
+      if (!link) return;
+      const href = link.getAttribute('href') || '';
+      const idMatch = href.match(/\/post-(\d+)(?:-|\/|$)/);
+      if (!idMatch) return;
+      
+      const threadId = idMatch[1];
+      const title = String(link.textContent || "").replace(/\s+/g, " ").trim();
+      const views = readMetric(item, 'views');
+      const comments = readMetric(item, 'comments');
+      
+      const authorEl = item.querySelector("a[href*='/space/']") || item.querySelector('.info-author a, .post-author a');
+      let authorName = '';
+      let authorId = '';
+      if (authorEl) {
+        authorName = authorEl.textContent.trim();
+        const authorHref = authorEl.getAttribute('href') || '';
+        const uidMatch = authorHref.match(/\/space\/(\d+)/);
+        if (uidMatch) {
+          authorId = uidMatch[1];
+        }
+      }
+
+      // 过滤与屏蔽
+      if (idBlockList.includes(threadId)) return;
+      if (authorName && userBlockList.includes(authorName.toLowerCase())) return;
+      if (authorId && userBlockList.includes(authorId.toLowerCase())) return;
+      if (kwBlockList.length > 0 && kwBlockList.some(k => title.toLowerCase().includes(k))) return;
+      if (views < config.minViews || comments < config.minComments) return;
+      if (item.querySelector('use[href="#lock"]')) return;
+      if (kwFilterList.length > 0 && !kwFilterList.some(k => title.toLowerCase().includes(k))) return;
+
+      posts.push({
+        id: threadId,
+        title: title,
+        url: href.startsWith('http') ? href : (location.origin + href),
+        views,
+        comments,
+        authorName,
+        authorId
+      });
+    });
+
+    return posts;
+  }
+
+  function getNextPageUrlFromDoc(doc, currentUrl) {
+    const nextLink = Array.from(doc.querySelectorAll('a')).find(el => {
+      const text = el.textContent.trim();
+      return text === '下一页' || text === '后一页' || text.toLowerCase() === 'next' || el.classList.contains('next');
+    });
+    if (nextLink) {
+      const href = nextLink.getAttribute('href');
+      if (href) return href;
+    }
+    
+    // 智能算术推导
+    const match = currentUrl.match(/\/page-(\d+)/);
+    if (match) {
+      const nextNum = parseInt(match[1]) + 1;
+      return currentUrl.replace(/\/page-\d+/, `/page-${nextNum}`);
+    } else {
+      if (currentUrl === '/' || currentUrl === '' || currentUrl.startsWith('/?')) {
+        return '/page-2';
+      }
+      if (currentUrl.startsWith('/categories/')) {
+        const cleanPath = currentUrl.split('?')[0];
+        const search = currentUrl.includes('?') ? '?' + currentUrl.split('?')[1] : '';
+        const base = cleanPath.endsWith('/') ? cleanPath.slice(0, -1) : cleanPath;
+        return `${base}/page-2` + search;
+      }
+    }
+    return null;
+  }
+
+  async function gatherMatchingPosts(limit) {
+    let matchedPosts = [];
+    let currentPageUrl = location.pathname + location.search;
+
+    while (matchedPosts.length < limit) {
+      addLog(`正在扫描列表页面 ${currentPageUrl} 中的符合条件的帖子...`, 'info');
+      let htmlText;
+      if (currentPageUrl === location.pathname + location.search) {
+        htmlText = document.documentElement.outerHTML;
+      } else {
+        htmlText = await fetchHtml(currentPageUrl);
+      }
+
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(htmlText, 'text/html');
+      const pagePosts = parsePostsFromDoc(doc);
+      
+      if (pagePosts.length === 0) {
+        addLog(`页面 ${currentPageUrl} 未找到符合过滤条件的帖子。`, 'warning');
+      } else {
+        addLog(`从页面 ${currentPageUrl} 找到 ${pagePosts.length} 个符合条件的帖子。`, 'info');
+      }
+
+      for (const post of pagePosts) {
+        if (matchedPosts.length < limit) {
+          matchedPosts.push(post);
+        }
+      }
+
+      if (matchedPosts.length >= limit) {
+        break;
+      }
+
+      const nextUrl = getNextPageUrlFromDoc(doc, currentPageUrl);
+      if (!nextUrl) {
+        addLog(`已扫描到最后一页，无法搜集更多帖子。`, 'warning');
+        break;
+      }
+      currentPageUrl = nextUrl;
+      await sleep(1000);
+    }
+
+    return matchedPosts;
+  }
+
+  async function crawlPostDetails(post) {
+    const htmlText = await fetchHtml(post.url);
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(htmlText, 'text/html');
+
+    // 1. 正文解析
+    const contentEl = doc.querySelector('.post-content .md-content, .post-content, .post .md-content, .md-content');
+    const contentMarkdown = contentEl ? htmlToMarkdown(contentEl) : "未获取到正文内容";
+
+    // 2. 评论解析
+    const commentItems = doc.querySelectorAll('.comment-item, .comment, .comment-list-item');
+    const comments = [];
+
+    if (commentItems.length > 0) {
+      commentItems.forEach(item => {
+        const authorEl = item.querySelector("a[href*='/space/']") || item.querySelector('.comment-author a, .info-author a');
+        const author = authorEl ? authorEl.textContent.trim() : "匿名";
+        const contentEl = item.querySelector('.comment-content .md-content, .comment-content, .md-content, .content');
+        const content = contentEl ? htmlToMarkdown(contentEl).trim() : "";
+        const floorEl = item.querySelector('.floor, .comment-floor');
+        const floor = floorEl ? floorEl.textContent.trim() : "";
+
+        if (content) {
+          comments.push({ author, content, floor });
+        }
+      });
+    } else {
+      const commentContents = doc.querySelectorAll('.comment-content, .comment-text');
+      commentContents.forEach((el, index) => {
+        const content = htmlToMarkdown(el).trim();
+        if (content) {
+          comments.push({
+            author: "用户",
+            content: content,
+            floor: `#${index + 1}`
+          });
+        }
+      });
+    }
+
+    return {
+      ...post,
+      content: contentMarkdown,
+      comments
+    };
+  }
+
+  function exportStatsToMarkdown(results) {
+    const config = getLocalConfig();
+    const now = new Date();
+    const timeStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
+    
+    let md = `# NodeSeek 流量帖子内容与评论统计报表\n\n`;
+    md += `* **导出时间**: ${timeStr}\n`;
+    md += `* **过滤规则**: 阅读量 >= ${config.minViews} | 评论量 >= ${config.minComments}\n\n`;
+    
+    md += `---\n\n## 📝 帖子目录索引\n\n`;
+    results.forEach((post, index) => {
+      md += `${index + 1}. [${post.title}](#post-${post.id})\n`;
+    });
+    md += `\n---\n\n`;
+    
+    results.forEach((post, index) => {
+      md += `<a name="post-${post.id}"></a>\n`;
+      md += `## ${index + 1}. ${post.title}\n\n`;
+      md += `* **原帖链接**: [点击访问](${post.url})\n`;
+      md += `* **作者**: @${post.authorName || '未知'} (UID: ${post.authorId || '未知'})\n`;
+      md += `* **数据**: 👀 ${post.views} 阅读 | 💬 ${post.comments} 评论\n\n`;
+      
+      md += `### 📄 帖子正文内容\n\n`;
+      md += `${post.content.trim()}\n\n`;
+      
+      md += `### 💬 帖子评论集 (${post.comments.length} 条)\n\n`;
+      if (post.comments.length === 0) {
+        md += `暂无符合条件的评论。\n\n`;
+      } else {
+        post.comments.forEach(comment => {
+          const floor = comment.floor ? `**[${comment.floor}]** ` : "";
+          md += `* ${floor}**@${comment.author}**: ${comment.content.trim()}\n`;
+        });
+        md += `\n`;
+      }
+      md += `\n---\n\n`;
+    });
+    
+    const fileName = `NodeSeek_Stats_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}.md`;
+    
+    const a = document.createElement("a");
+    const file = new Blob([md], { type: "text/markdown;charset=utf-8" });
+    a.href = URL.createObjectURL(file);
+    a.download = fileName;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  }
+
+  async function runStatsCollection(limit) {
+    addLog(`🚀 启动帖子内容统计，目标帖子数量上限: ${limit}`, 'info');
+    
+    const posts = await gatherMatchingPosts(limit);
+    if (posts.length === 0) {
+      addLog(`⚠️ 没有找到任何符合流量和过滤条件的帖子！`, 'warning');
+      return;
+    }
+    
+    addLog(`📂 帖子列表收集完毕，共获取 ${posts.length} 个符合条件的帖子。准备开始爬取详细内容和评论...`, 'success');
+    
+    const results = [];
+    
+    for (let i = 0; i < posts.length; i++) {
+      const post = posts[i];
+      addLog(`⏳ [${i + 1}/${posts.length}] 正在爬取帖子: 《${post.title}》...`, 'info');
+      
+      try {
+        const details = await crawlPostDetails(post);
+        results.push(details);
+        addLog(`✅ [${i + 1}/${posts.length}] 爬取成功！获取到 ${details.comments.length} 条评论。`, 'success');
+      } catch (err) {
+        addLog(`❌ [${i + 1}/${posts.length}] 爬取失败: ${err.message}`, 'error');
+        results.push({
+          ...post,
+          content: `爬取失败: ${err.message}`,
+          comments: []
+        });
+      }
+      
+      if (i < posts.length - 1) {
+        const delay = 1000 + Math.random() * 500;
+        await sleep(delay);
+      }
+    }
+    
+    addLog(`📝 正在生成 Markdown 报告文档...`, 'info');
+    exportStatsToMarkdown(results);
+    addLog(`🎉 统计完成，已生成并触发 Markdown 文档下载！`, 'success');
+  }
+
   // ==================== 自动化核心与调度 ====================
   function saveRepliedIds() {
     GM_setValue('ns_auto_reply_replied_ids', Array.from(runtime.repliedIds));
+  }
+
+  function updateImportCountUI() {
+    const taskCountText = runtime.panel?.querySelector('#ns-task-count-text');
+    if (taskCountText) {
+      const importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+      taskCountText.textContent = importedTasks.length;
+    }
   }
 
   function stopReplier(reason = '用户手动停止') {
@@ -1094,7 +1376,7 @@ ${candidateTexts.join('\n')}`;
       runtime.startBtn.textContent = '开始自动回帖';
       runtime.startBtn.classList.remove('running');
     }
-    const statusText = runtime.panel?.shadowRoot?.getElementById('ns-status-text');
+    const statusText = runtime.panel?.querySelector('#ns-status-text');
     if (statusText) {
       statusText.textContent = '已停止';
       statusText.style.color = '#f87171';
@@ -1129,13 +1411,22 @@ ${candidateTexts.join('\n')}`;
     }
 
     const task = runtime.queue.shift();
+    
+    // 如果此任务是导入的智能任务，从本地存储中清除它，并更新 UI 的待处理任务数量
+    if (task.importedReply) {
+      let importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+      importedTasks = importedTasks.filter(t => String(t.postId) !== String(task.id));
+      GM_setValue('ns_auto_reply_imported_tasks', importedTasks);
+      updateImportCountUI();
+    }
+    
     runtime.repliedIds.add(task.id);
     saveRepliedIds();
 
     addLog(`📝 准备回复帖子：《${task.title}》...`, 'info');
     
-    // 1. 挑选出最贴切且近 5 次不重复的回复 (严格限定在预设库范围内)
-    const replyText = await selectFinalReply(task.title, config);
+    // 1. 挑选出回复文案
+    const replyText = task.importedReply || await selectFinalReply(task.title, config);
 
     // 2. 模拟回帖 (双通道机制)
     try {
@@ -1207,6 +1498,25 @@ ${candidateTexts.join('\n')}`;
         if (uidMatch) {
           authorId = uidMatch[1];
         }
+      }
+
+      // --- 智能任务匹配 ---
+      const importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+      const matchedImported = importedTasks.find(t => String(t.postId) === String(threadId));
+      if (matchedImported) {
+        if (!runtime.repliedIds.has(threadId)) {
+          scanned.unshift({
+            id: threadId,
+            title: title,
+            url: `${location.origin}/post-${threadId}-1`,
+            views,
+            comments,
+            authorName,
+            authorId,
+            importedReply: matchedImported.reply
+          });
+        }
+        return;
       }
 
       // --- 屏蔽逻辑过滤 ---
@@ -1453,7 +1763,11 @@ ${candidateTexts.join('\n')}`;
           </button>
         </div>
       </div>
-      <button class="ns-btn-primary" id="ns-btn-start" style="margin-top: 10px;">开始自动回帖</button>
+      <div style="display: flex; gap: 8px; margin-top: 10px;">
+        <button class="ns-btn-primary" id="ns-btn-start" style="flex: 1; margin: 0;">开始自动回帖</button>
+        <button class="ns-btn-primary" id="ns-btn-import-json" style="flex: 1; margin: 0; background: #16a34a;" title="导入 AI 智能回帖 JSON">导入 JSON 任务</button>
+      </div>
+      <button class="ns-btn-primary" id="ns-btn-stats" style="margin-top: 8px; background: #0284c7;">帖子内容统计</button>
     `;
     contentWrapper.appendChild(panelControl);
 
@@ -1513,7 +1827,7 @@ ${candidateTexts.join('\n')}`;
     const footer = document.createElement('div');
     footer.className = 'ns-footer';
     footer.innerHTML = `
-      <span>当前状态: <strong id="ns-status-text" style="color: var(--ns-fg); opacity: 0.8;">空闲</strong></span>
+      <span>状态: <strong id="ns-status-text" style="color: var(--ns-fg); opacity: 0.8;">空闲</strong> | 智能任务: <strong id="ns-task-count-text" style="color: var(--ns-accent);">0</strong></span>
       <span>NS水贴助手 v1.5.0</span>
     `;
     panel.appendChild(footer);
@@ -1670,6 +1984,95 @@ ${candidateTexts.join('\n')}`;
       }
     });
 
+    // 绑定导入 JSON 任务按钮
+    const importBtn = panelControl.querySelector('#ns-btn-import-json');
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.json';
+    fileInput.style.display = 'none';
+    panelControl.appendChild(fileInput);
+
+    importBtn.addEventListener('click', () => {
+      fileInput.click();
+    });
+
+    fileInput.addEventListener('change', (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = (event) => {
+        try {
+          const parsed = JSON.parse(event.target.result);
+          if (!Array.isArray(parsed)) {
+            throw new Error("JSON 根节点必须是一个数组");
+          }
+          
+          const validTasks = [];
+          for (let i = 0; i < parsed.length; i++) {
+            const item = parsed[i];
+            const postId = item.postId || item.id;
+            const reply = item.reply;
+            if (!postId || !reply) {
+              throw new Error(`第 ${i + 1} 项数据格式不正确，必须包含 postId 和 reply 字段`);
+            }
+            validTasks.push({
+              postId: String(postId).trim(),
+              title: (item.title || "").trim(),
+              reply: String(reply).trim()
+            });
+          }
+
+          const existing = GM_getValue('ns_auto_reply_imported_tasks', []);
+          const merged = [...existing];
+          
+          validTasks.forEach(newTask => {
+            const idx = merged.findIndex(t => String(t.postId) === String(newTask.postId));
+            if (idx >= 0) {
+              merged[idx] = newTask;
+            } else {
+              merged.push(newTask);
+            }
+          });
+
+          GM_setValue('ns_auto_reply_imported_tasks', merged);
+          addLog(`📥 成功导入 ${validTasks.length} 个 AI 回帖任务！当前累计待处理智能任务: ${merged.length} 个。`, 'success');
+          updateImportCountUI();
+          
+          fileInput.value = '';
+        } catch (err) {
+          addLog(`❌ 解析并导入 JSON 任务失败: ${err.message}`, 'error');
+          alert(`导入失败: ${err.message}`);
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    // 绑定帖子内容统计按钮
+    const statsBtn = panelControl.querySelector('#ns-btn-stats');
+    statsBtn.addEventListener('click', async () => {
+      const limitInput = prompt("请输入需要统计的符合条件的帖子数量上限：", "10");
+      if (limitInput === null) return;
+      const limit = parseInt(limitInput) || 10;
+
+      // 切换到日志页面
+      tabs.forEach(t => t.classList.remove('active'));
+      tabPanels.forEach(p => p.classList.remove('active'));
+      tabsContainer.querySelector('[data-target="ns-panel-log"]').classList.add('active');
+      panelLog.classList.add('active');
+
+      try {
+        statsBtn.disabled = true;
+        statsBtn.textContent = '统计中...';
+        await runStatsCollection(limit);
+      } catch (err) {
+        addLog(`❌ 统计过程中发生错误: ${err.message}`, 'error');
+      } finally {
+        statsBtn.disabled = false;
+        statsBtn.textContent = '帖子内容统计';
+      }
+    });
+
     // 页面初始化日志提示
     addLog('👋 欢迎使用 NodeSeek 自动回帖/水贴助手！', 'success');
     addLog('💡 优先使用 [DOM 模拟拟人化] 双通道回帖，失败自动切换到 [API 发包] 模式。', 'info');
@@ -1679,13 +2082,14 @@ ${candidateTexts.join('\n')}`;
   // ==================== 初始化入口 ====================
   function init() {
     injectUI();
+    updateImportCountUI();
 
     // 检测跨页运行标记，并自动恢复运行状态
     const autoStart = GM_getValue('ns_auto_reply_running_state', false);
     if (autoStart) {
       addLog('🔄 检测到跨页连续运行标记，已自动恢复恢复运行中...', 'success');
       setTimeout(() => {
-        const startBtn = runtime.panel?.shadowRoot?.getElementById('ns-btn-start');
+        const startBtn = runtime.panel?.querySelector('#ns-btn-start');
         if (startBtn && !runtime.isRunning) {
           startBtn.click();
         }

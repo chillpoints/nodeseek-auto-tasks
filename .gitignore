@@ -1,8 +1,8 @@
-# Ignore unrelated photo manager scripts
-*.py
-*.pyw
-*.json
-.photo_manager_config.json
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Agent scratch & logs
 /scratch/
 /logs/
 /steps/
