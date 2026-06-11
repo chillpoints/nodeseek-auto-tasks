@@ -1107,7 +1107,7 @@ ${candidateTexts.join('\n')}`;
       const views = readMetric(item, 'views');
       const comments = readMetric(item, 'comments');
       
-      const authorEl = item.querySelector("a[href*='/space/']") || item.querySelector('.info-author a, .post-author a');
+      const authorEl = item.querySelector('.info-author a, .post-author a') || Array.from(item.querySelectorAll("a[href*='/space/']")).find(el => el.textContent.trim().length > 0);
       let authorName = '';
       let authorId = '';
       if (authorEl) {
@@ -1226,20 +1226,20 @@ ${candidateTexts.join('\n')}`;
     const contentMarkdown = contentEl ? htmlToMarkdown(contentEl) : "未获取到正文内容";
 
     // 2. 评论解析
-    const commentItems = doc.querySelectorAll('.comment-item, .comment, .comment-list-item');
-    const comments = [];
+    const commentItems = doc.querySelectorAll('ul.comments li.content-item, .comments .content-item');
+    const commentsList = [];
 
     if (commentItems.length > 0) {
       commentItems.forEach(item => {
-        const authorEl = item.querySelector("a[href*='/space/']") || item.querySelector('.comment-author a, .info-author a');
+        const authorEl = item.querySelector('.author-name') || item.querySelector('.comment-author a, .info-author a') || Array.from(item.querySelectorAll("a[href*='/space/']")).find(el => el.textContent.trim().length > 0);
         const author = authorEl ? authorEl.textContent.trim() : "匿名";
-        const contentEl = item.querySelector('.comment-content .md-content, .comment-content, .md-content, .content');
+        const contentEl = item.querySelector('article.post-content, .post-content, .comment-content, .md-content');
         const content = contentEl ? htmlToMarkdown(contentEl).trim() : "";
-        const floorEl = item.querySelector('.floor, .comment-floor');
+        const floorEl = item.querySelector('.floor-link, .floor, .comment-floor');
         const floor = floorEl ? floorEl.textContent.trim() : "";
 
         if (content) {
-          comments.push({ author, content, floor });
+          commentsList.push({ author, content, floor });
         }
       });
     } else {
@@ -1247,7 +1247,7 @@ ${candidateTexts.join('\n')}`;
       commentContents.forEach((el, index) => {
         const content = htmlToMarkdown(el).trim();
         if (content) {
-          comments.push({
+          commentsList.push({
             author: "用户",
             content: content,
             floor: `#${index + 1}`
@@ -1259,7 +1259,7 @@ ${candidateTexts.join('\n')}`;
     return {
       ...post,
       content: contentMarkdown,
-      comments
+      commentsList
     };
   }
 
@@ -1288,11 +1288,11 @@ ${candidateTexts.join('\n')}`;
       md += `### 📄 帖子正文内容\n\n`;
       md += `${post.content.trim()}\n\n`;
       
-      md += `### 💬 帖子评论集 (${post.comments.length} 条)\n\n`;
-      if (post.comments.length === 0) {
+      md += `### 💬 帖子评论集 (${(post.commentsList || []).length} 条)\n\n`;
+      if (!post.commentsList || post.commentsList.length === 0) {
         md += `暂无符合条件的评论。\n\n`;
       } else {
-        post.comments.forEach(comment => {
+        post.commentsList.forEach(comment => {
           const floor = comment.floor ? `**[${comment.floor}]** ` : "";
           md += `* ${floor}**@${comment.author}**: ${comment.content.trim()}\n`;
         });
@@ -1333,13 +1333,13 @@ ${candidateTexts.join('\n')}`;
       try {
         const details = await crawlPostDetails(post);
         results.push(details);
-        addLog(`✅ [${i + 1}/${posts.length}] 爬取成功！获取到 ${details.comments.length} 条评论。`, 'success');
+        addLog(`✅ [${i + 1}/${posts.length}] 爬取成功！获取到 ${details.commentsList.length} 条评论。`, 'success');
       } catch (err) {
         addLog(`❌ [${i + 1}/${posts.length}] 爬取失败: ${err.message}`, 'error');
         results.push({
           ...post,
           content: `爬取失败: ${err.message}`,
-          comments: []
+          commentsList: []
         });
       }
       
@@ -1488,7 +1488,7 @@ ${candidateTexts.join('\n')}`;
       
       // 提取发帖人与发帖人 ID
       // 优先寻找指向 /space/ 的 a 标签，以防 class 被 NodeSeek 更改
-      const authorEl = item.querySelector("a[href*='/space/']") || item.querySelector('.info-author a, .post-author a');
+      const authorEl = item.querySelector('.info-author a, .post-author a') || Array.from(item.querySelectorAll("a[href*='/space/']")).find(el => el.textContent.trim().length > 0);
       let authorName = '';
       let authorId = '';
       if (authorEl) {
