@@ -1,3 +1,7 @@
+# Ignore unrelated local projects
+/photo-manager/
+/skills/my-coffee-skill/
+
 # Python bytecode
 __pycache__/
 *.pyc
