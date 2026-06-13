@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         NodeSeek 自动回帖/水贴助手
+// @name         NodeSeek 自动任务助手 (发帖/回帖)
 // @namespace    https://github.com/chillpoints/nodeseek-auto-reply
-// @version      1.5.0
-// @description  自动选择浏览量和评论量大的帖子回复评论。优先使用 DOM 模拟拟人化回复，失败则自动切换 API 直接发包；支持 OpenAI 官方格式 API、分类关键词匹配和实时运行日志；新增特定关键词、帖子ID及发帖用户的多重屏蔽过滤功能；支持自由定制控制面板配色（默认为 Background #FFFDF5, Foreground #101010, Accent #CB4B16）。
+// @version      1.6.0
+// @description  自动选择浏览量和评论量大的帖子回复评论，并支持导入自动发帖任务。优先使用 DOM 模拟拟人化回复/发布，失败则自动切换 API 直接发包；支持 OpenAI 官方格式 API、分类关键词匹配和实时运行日志；新增特定关键词、帖子ID及发帖用户的多重屏蔽过滤功能；支持自由定制控制面板配色。
 // @author       Antigravity
 // @match        *://www.nodeseek.com/*
 // @match        *://nodeseek.com/*
@@ -1003,6 +1003,60 @@ ${candidateTexts.join('\n')}`;
     });
   }
 
+  // ==================== API 接口直接发帖功能 ====================
+  function performApiPost(title, content, category) {
+    return new Promise((resolve, reject) => {
+      const csrfToken = document.querySelector('meta[name="csrf-token"]')?.getAttribute('content');
+      if (!csrfToken) {
+        reject(new Error("未在主页面上找到 Csrf-Token，无法发布帖子"));
+        return;
+      }
+
+      const payload = {
+        content: content,
+        mode: "new-discussion",
+        title: title,
+        category: category || "info",
+        rank: 4
+      };
+
+      GM_xmlhttpRequest({
+        method: "POST",
+        url: `${location.origin}/api/content/new-discussion`,
+        headers: {
+          "Content-Type": "application/json",
+          "Csrf-Token": csrfToken,
+          "Referer": `${location.origin}/new-discussion?category=${category || "info"}`,
+          "Origin": location.origin,
+          "X-Requested-With": "XMLHttpRequest"
+        },
+        data: JSON.stringify(payload),
+        onload: (xhr) => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const res = JSON.parse(xhr.responseText);
+              if (res && res.success !== false) {
+                resolve(res);
+              } else {
+                reject(new Error(res?.message || "服务器端处理发贴请求返回失败状态"));
+              }
+            } catch (e) {
+              resolve({});
+            }
+          } else {
+            let errMsg = `HTTP ${xhr.status}`;
+            try {
+              const res = JSON.parse(xhr.responseText);
+              if (res?.message) errMsg = res.message;
+            } catch (_) {}
+            reject(new Error(errMsg));
+          }
+        },
+        onerror: () => reject(new Error("API 发贴请求异常（可能是网络中断或防火墙阻断）"))
+      });
+    });
+  }
+
   // ==================== 双通道回复适配器 ====================
   async function performReply(threadId, threadUrl, replyText, title) {
     try {
@@ -1374,7 +1428,7 @@ ${candidateTexts.join('\n')}`;
     if (runtime.timer) clearTimeout(runtime.timer);
     runtime.timer = null;
     if (runtime.startBtn) {
-      runtime.startBtn.textContent = '开始自动回帖';
+      runtime.startBtn.textContent = '开始自动任务';
       runtime.startBtn.classList.remove('running');
     }
     const statusText = runtime.panel?.querySelector('#ns-status-text');
@@ -1430,29 +1484,51 @@ ${candidateTexts.join('\n')}`;
       importedTasks = importedTasks.filter(t => String(t.postId) !== String(task.id));
       GM_setValue('ns_auto_reply_imported_tasks', importedTasks);
       updateImportCountUI();
+    } else if (task.importedPost) {
+      let importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+      importedTasks = importedTasks.filter(t => t.taskType === "post" ? t.taskId !== task.id : true);
+      GM_setValue('ns_auto_reply_imported_tasks', importedTasks);
+      updateImportCountUI();
     }
     
     runtime.repliedIds.add(task.id);
     saveRepliedIds();
 
-    addLog(`📝 准备回复帖子：《${task.title}》...`, 'info');
-    
-    // 1. 挑选出回复文案
-    const replyText = task.importedReply || await selectFinalReply(task.title, config);
-
-    // 2. 模拟回帖 (双通道机制)
-    try {
-      await performReply(task.id, task.url, replyText, task.title);
-      runtime.repliedCount++;
-      GM_setValue('ns_auto_reply_replied_count', runtime.repliedCount); // 持久化保存计数以支持跨页运行
-      if (isSmartMode) {
-        const remaining = GM_getValue('ns_auto_reply_imported_tasks', []).length;
-        addLog(`✅ 成功回帖！[当前累计回复: ${runtime.repliedCount} | 剩余智能任务: ${remaining}] 帖子:《${task.title}》`, 'success');
-      } else {
-        addLog(`✅ 成功回帖！[当前本次累计: ${runtime.repliedCount}/${config.maxCount}] 帖子:《${task.title}》`, 'success');
+    if (task.taskType === "post") {
+      addLog(`📝 准备发布新帖子：《${task.title}》...`, 'info');
+      try {
+        await performApiPost(task.title, task.content, task.category);
+        runtime.repliedCount++;
+        GM_setValue('ns_auto_reply_replied_count', runtime.repliedCount); // 持久化保存计数以支持跨页运行
+        if (isSmartMode) {
+          const remaining = GM_getValue('ns_auto_reply_imported_tasks', []).length;
+          addLog(`✅ 成功发布新帖子！[当前累计操作: ${runtime.repliedCount} | 剩余智能任务: ${remaining}] 标题:《${task.title}》`, 'success');
+        } else {
+          addLog(`✅ 成功发布新帖子！[当前本次累计: ${runtime.repliedCount}/${config.maxCount}] 标题:《${task.title}》`, 'success');
+        }
+      } catch (e) {
+        addLog(`❌ 发布新帖子失败: ${e.message}`, 'error');
       }
-    } catch (e) {
-      addLog(`❌ 回帖失败: ${e.message}`, 'error');
+    } else {
+      addLog(`📝 准备回复帖子：《${task.title}》...`, 'info');
+      
+      // 1. 挑选出回复文案
+      const replyText = task.importedReply || await selectFinalReply(task.title, config);
+
+      // 2. 模拟回帖 (双通道机制)
+      try {
+        await performReply(task.id, task.url, replyText, task.title);
+        runtime.repliedCount++;
+        GM_setValue('ns_auto_reply_replied_count', runtime.repliedCount); // 持久化保存计数以支持跨页运行
+        if (isSmartMode) {
+          const remaining = GM_getValue('ns_auto_reply_imported_tasks', []).length;
+          addLog(`✅ 成功回帖！[当前累计回复: ${runtime.repliedCount} | 剩余智能任务: ${remaining}] 帖子:《${task.title}》`, 'success');
+        } else {
+          addLog(`✅ 成功回帖！[当前本次累计: ${runtime.repliedCount}/${config.maxCount}] 帖子:《${task.title}》`, 'success');
+        }
+      } catch (e) {
+        addLog(`❌ 回帖失败: ${e.message}`, 'error');
+      }
     }
 
     // 3. 计算下一次的延迟
@@ -1470,6 +1546,22 @@ ${candidateTexts.join('\n')}`;
     const config = getLocalConfig();
     const items = document.querySelectorAll('li.post-list-item, .post-list-item');
     const scanned = [];
+    
+    // --- 优先提取导入的发帖任务 ---
+    const importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+    const postTasks = importedTasks.filter(t => t.taskType === "post");
+    postTasks.forEach(task => {
+      if (!runtime.repliedIds.has(task.taskId)) {
+        scanned.push({
+          taskType: "post",
+          id: task.taskId,
+          title: task.title,
+          content: task.content,
+          category: task.category,
+          importedPost: true
+        });
+      }
+    });
     
     const kwFilterList = config.kwFilter.split(/[，,]/).map(k => k.trim().toLowerCase()).filter(Boolean);
 
@@ -1617,14 +1709,14 @@ ${candidateTexts.join('\n')}`;
       const importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
       if (importedTasks.length > 0) {
         GM_setValue('ns_auto_reply_smart_mode', true);
-        addLog(`🎯 开启智能回帖任务模式，总计待处理任务: ${importedTasks.length} 个。`, 'success');
+        addLog(`🎯 开启智能任务模式，总计待处理任务: ${importedTasks.length} 个。`, 'success');
       } else {
         GM_setValue('ns_auto_reply_smart_mode', false);
       }
     }
     
     if (runtime.startBtn) {
-      runtime.startBtn.textContent = '停止自动回帖';
+      runtime.startBtn.textContent = '停止自动任务';
       runtime.startBtn.classList.add('running');
     }
 
@@ -1802,8 +1894,8 @@ ${candidateTexts.join('\n')}`;
         </div>
       </div>
       <div style="display: flex; gap: 8px; margin-top: 10px;">
-        <button class="ns-btn-primary" id="ns-btn-start" style="flex: 1; margin: 0;">开始自动回帖</button>
-        <button class="ns-btn-primary" id="ns-btn-import-json" style="flex: 1; margin: 0; background: #16a34a;" title="导入 AI 智能回帖 JSON">导入 JSON 任务</button>
+        <button class="ns-btn-primary" id="ns-btn-start" style="flex: 1; margin: 0;">开始自动任务</button>
+        <button class="ns-btn-primary" id="ns-btn-import-json" style="flex: 1; margin: 0; background: #16a34a;" title="导入 AI 智能 JSON 任务">导入 JSON 任务</button>
       </div>
       <div style="display: flex; gap: 8px; margin-top: 8px;">
         <button class="ns-btn-primary" id="ns-btn-stats" style="flex: 1; margin: 0; background: #0284c7;">帖子内容统计</button>
@@ -1869,7 +1961,7 @@ ${candidateTexts.join('\n')}`;
     footer.className = 'ns-footer';
     footer.innerHTML = `
       <span>状态: <strong id="ns-status-text" style="color: var(--ns-fg); opacity: 0.8;">空闲</strong> | 智能任务: <strong id="ns-task-count-text" style="color: var(--ns-accent);">0</strong></span>
-      <span>NS水贴助手 v1.5.0</span>
+      <span>NS任务助手 v1.6.0</span>
     `;
     panel.appendChild(footer);
 
@@ -2052,23 +2144,47 @@ ${candidateTexts.join('\n')}`;
           const validTasks = [];
           for (let i = 0; i < parsed.length; i++) {
             const item = parsed[i];
-            const postId = item.postId || item.id;
-            const reply = item.reply;
-            if (!postId || !reply) {
-              throw new Error(`第 ${i + 1} 项数据格式不正确，必须包含 postId 和 reply 字段`);
+            const taskType = item.taskType || "reply";
+            
+            if (taskType === "post") {
+              const title = item.title;
+              const content = item.content;
+              const category = item.category || "info";
+              if (!title || !content) {
+                throw new Error(`第 ${i + 1} 项发帖数据格式不正确，必须包含 title 和 content 字段`);
+              }
+              validTasks.push({
+                taskType: "post",
+                taskId: item.taskId || `post_${Date.now()}_${i}`,
+                title: String(title).trim(),
+                content: String(content).trim(),
+                category: String(category).trim()
+              });
+            } else {
+              const postId = item.postId || item.id;
+              const reply = item.reply;
+              if (!postId || !reply) {
+                throw new Error(`第 ${i + 1} 项回帖数据格式不正确，必须包含 postId/id 和 reply 字段`);
+              }
+              validTasks.push({
+                taskType: "reply",
+                postId: String(postId).trim(),
+                title: (item.title || "").trim(),
+                reply: String(reply).trim()
+              });
             }
-            validTasks.push({
-              postId: String(postId).trim(),
-              title: (item.title || "").trim(),
-              reply: String(reply).trim()
-            });
           }
 
           const existing = GM_getValue('ns_auto_reply_imported_tasks', []);
           const merged = [...existing];
           
           validTasks.forEach(newTask => {
-            const idx = merged.findIndex(t => String(t.postId) === String(newTask.postId));
+            let idx = -1;
+            if (newTask.taskType === "post") {
+              idx = merged.findIndex(t => t.taskType === "post" && (t.taskId === newTask.taskId || t.title === newTask.title));
+            } else {
+              idx = merged.findIndex(t => t.taskType !== "post" && String(t.postId) === String(newTask.postId));
+            }
             if (idx >= 0) {
               merged[idx] = newTask;
             } else {
@@ -2077,7 +2193,7 @@ ${candidateTexts.join('\n')}`;
           });
 
           GM_setValue('ns_auto_reply_imported_tasks', merged);
-          addLog(`📥 成功导入 ${validTasks.length} 个 AI 回帖任务！当前累计待处理智能任务: ${merged.length} 个。`, 'success');
+          addLog(`📥 成功导入 ${validTasks.length} 个 AI 智能任务！当前累计待处理智能任务: ${merged.length} 个。`, 'success');
           updateImportCountUI();
           
           fileInput.value = '';
