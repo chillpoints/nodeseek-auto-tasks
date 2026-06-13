@@ -1369,6 +1369,7 @@ ${candidateTexts.join('\n')}`;
 
   function stopReplier(reason = '用户手动停止') {
     GM_setValue('ns_auto_reply_running_state', false);
+    GM_setValue('ns_auto_reply_smart_mode', false);
     runtime.isRunning = false;
     if (runtime.timer) clearTimeout(runtime.timer);
     runtime.timer = null;
@@ -1388,11 +1389,22 @@ ${candidateTexts.join('\n')}`;
     if (!runtime.isRunning) return;
 
     const config = getLocalConfig();
+    const isSmartMode = GM_getValue('ns_auto_reply_smart_mode', false);
     
-    // 检查回帖总数上限
-    if (runtime.repliedCount >= config.maxCount) {
-      stopReplier('已达到预设的本次回帖总数上限');
-      return;
+    // 检查回帖限制
+    if (isSmartMode) {
+      const importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+      const hasImportedInQueue = runtime.queue.some(t => t.importedReply);
+      if (importedTasks.length === 0 && !hasImportedInQueue) {
+        stopReplier('已完成所有导入的智能回帖任务');
+        return;
+      }
+    } else {
+      // 仅在普通模式下检查预设的回帖总数上限
+      if (runtime.repliedCount >= config.maxCount) {
+        stopReplier('已达到预设的本次回帖总数上限');
+        return;
+      }
     }
 
     if (runtime.queue.length === 0) {
@@ -1403,7 +1415,7 @@ ${candidateTexts.join('\n')}`;
         if (nextUrl) {
           triggerNextPage(nextUrl);
         } else {
-          addLog('📭 页面已无符合条件的未回复帖子，且未能查找到下一页链接。已安全休眠，等待重新扫描。', 'warning');
+          addLog('📭 页面已无符合条件的未回复帖子，且未能查查找下一页链接。已安全休眠，等待重新扫描。', 'warning');
           runtime.timer = setTimeout(executeNext, 30000);
         }
         return;
@@ -1432,7 +1444,13 @@ ${candidateTexts.join('\n')}`;
     try {
       await performReply(task.id, task.url, replyText, task.title);
       runtime.repliedCount++;
-      addLog(`✅ 成功回帖！[当前本次累计: ${runtime.repliedCount}/${config.maxCount}] 帖子:《${task.title}》`, 'success');
+      GM_setValue('ns_auto_reply_replied_count', runtime.repliedCount); // 持久化保存计数以支持跨页运行
+      if (isSmartMode) {
+        const remaining = GM_getValue('ns_auto_reply_imported_tasks', []).length;
+        addLog(`✅ 成功回帖！[当前累计回复: ${runtime.repliedCount} | 剩余智能任务: ${remaining}] 帖子:《${task.title}》`, 'success');
+      } else {
+        addLog(`✅ 成功回帖！[当前本次累计: ${runtime.repliedCount}/${config.maxCount}] 帖子:《${task.title}》`, 'success');
+      }
     } catch (e) {
       addLog(`❌ 回帖失败: ${e.message}`, 'error');
     }
@@ -1519,6 +1537,11 @@ ${candidateTexts.join('\n')}`;
         return;
       }
 
+      // 如果当前存有导入的智能任务，只处理匹配到的智能任务，忽略其他帖子
+      if (importedTasks.length > 0) {
+        return;
+      }
+
       // --- 屏蔽逻辑过滤 ---
       // 1. 已回复去重
       if (runtime.repliedIds.has(threadId)) return;
@@ -1564,7 +1587,7 @@ ${candidateTexts.join('\n')}`;
     addLog(`🔍 页面扫描：找到 ${scanned.length} 个符合过滤条件的帖子加入缓冲队列`, 'info');
   }
 
-  function startReplier() {
+  function startReplier(isRestore = false) {
     const config = getLocalConfig();
     
     // 安全验证
@@ -1583,7 +1606,22 @@ ${candidateTexts.join('\n')}`;
 
     GM_setValue('ns_auto_reply_running_state', true);
     runtime.isRunning = true;
-    runtime.repliedCount = 0;
+    
+    if (isRestore) {
+      runtime.repliedCount = GM_getValue('ns_auto_reply_replied_count', 0);
+      addLog(`🔄 已恢复运行状态，当前已回复累计: ${runtime.repliedCount}`, 'info');
+    } else {
+      runtime.repliedCount = 0;
+      GM_setValue('ns_auto_reply_replied_count', 0);
+      
+      const importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+      if (importedTasks.length > 0) {
+        GM_setValue('ns_auto_reply_smart_mode', true);
+        addLog(`🎯 开启智能回帖任务模式，总计待处理任务: ${importedTasks.length} 个。`, 'success');
+      } else {
+        GM_setValue('ns_auto_reply_smart_mode', false);
+      }
+    }
     
     if (runtime.startBtn) {
       runtime.startBtn.textContent = '停止自动回帖';
@@ -2086,6 +2124,7 @@ ${candidateTexts.join('\n')}`;
       }
       if (confirm(`确定要清空所有已导入的智能任务吗？共 ${importedTasks.length} 个任务。`)) {
         GM_setValue('ns_auto_reply_imported_tasks', []);
+        GM_setValue('ns_auto_reply_smart_mode', false);
         runtime.queue = runtime.queue.filter(t => !t.importedReply);
         updateImportCountUI();
         addLog('🗑️ 已成功清空所有待处理的智能任务！', 'success');
@@ -2106,11 +2145,16 @@ ${candidateTexts.join('\n')}`;
     // 检测跨页运行标记，并自动恢复运行状态
     const autoStart = GM_getValue('ns_auto_reply_running_state', false);
     if (autoStart) {
-      addLog('🔄 检测到跨页连续运行标记，已自动恢复恢复运行中...', 'success');
+      addLog('🔄 检测到跨页连续运行标记，已自动恢复运行中...', 'success');
       setTimeout(() => {
         const startBtn = runtime.panel?.querySelector('#ns-btn-start');
+        const statusText = runtime.panel?.querySelector('#ns-status-text');
         if (startBtn && !runtime.isRunning) {
-          startBtn.click();
+          if (statusText) {
+            statusText.textContent = '运行中';
+            statusText.style.color = '#4ade80';
+          }
+          startReplier(true); // 传入 true 表示跨页恢复，加载持久化回复计数
         }
       }, 1500); // 留出 1.5s 缓存时间让 DOM 准备就绪
     }
