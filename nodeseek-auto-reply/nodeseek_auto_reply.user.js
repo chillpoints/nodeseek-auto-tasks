@@ -1767,7 +1767,10 @@ ${candidateTexts.join('\n')}`;
         <button class="ns-btn-primary" id="ns-btn-start" style="flex: 1; margin: 0;">开始自动回帖</button>
         <button class="ns-btn-primary" id="ns-btn-import-json" style="flex: 1; margin: 0; background: #16a34a;" title="导入 AI 智能回帖 JSON">导入 JSON 任务</button>
       </div>
-      <button class="ns-btn-primary" id="ns-btn-stats" style="margin-top: 8px; background: #0284c7;">帖子内容统计</button>
+      <div style="display: flex; gap: 8px; margin-top: 8px;">
+        <button class="ns-btn-primary" id="ns-btn-stats" style="flex: 1; margin: 0; background: #0284c7;">帖子内容统计</button>
+        <button class="ns-btn-primary" id="ns-btn-clear-tasks" style="flex: 1; margin: 0; background: #dc2626;" title="清空所有导入的 JSON 智能任务">清空所有任务</button>
+      </div>
     `;
     contentWrapper.appendChild(panelControl);
 
@@ -2070,6 +2073,22 @@ ${candidateTexts.join('\n')}`;
       } finally {
         statsBtn.disabled = false;
         statsBtn.textContent = '帖子内容统计';
+      }
+    });
+
+    // 绑定清空所有任务按钮
+    const clearTasksBtn = panelControl.querySelector('#ns-btn-clear-tasks');
+    clearTasksBtn.addEventListener('click', () => {
+      const importedTasks = GM_getValue('ns_auto_reply_imported_tasks', []);
+      if (importedTasks.length === 0) {
+        alert('当前没有待处理的智能任务！');
+        return;
+      }
+      if (confirm(`确定要清空所有已导入的智能任务吗？共 ${importedTasks.length} 个任务。`)) {
+        GM_setValue('ns_auto_reply_imported_tasks', []);
+        runtime.queue = runtime.queue.filter(t => !t.importedReply);
+        updateImportCountUI();
+        addLog('🗑️ 已成功清空所有待处理的智能任务！', 'success');
       }
     });
 
